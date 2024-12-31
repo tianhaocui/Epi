@@ -7,7 +7,6 @@ type TestCase struct {
 	PathParams  map[string]string // 路径参数
 	QueryParams map[string]string // 查询参数
 	Body        string            // 请求体
-	Headers     map[string]string // 请求头
 	Expected    string            // 期望结果
 	StrictMatch bool              // 是否完全匹配
 	BaseURL     string            // 基础URL（可选）

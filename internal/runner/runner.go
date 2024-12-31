@@ -193,9 +193,6 @@ func (r *Runner) executeTest(caseNumber int, tc model.TestCase) model.TestResult
 	if tc.Token != "" {
 		req.Header.Set("Authorization", tc.Token)
 	}
-	for key, value := range tc.Headers {
-		req.Header.Set(key, value)
-	}
 
 	// 生成 curl 命令
 	curlCmd := r.toCurl(req, tc.Body)
