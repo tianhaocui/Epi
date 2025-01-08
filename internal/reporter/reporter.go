@@ -2,9 +2,6 @@ package reporter
 
 import (
 	"fmt"
-	"net/url"
-	"path"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -23,13 +20,13 @@ const (
 	defaultColumnWidth     = 12
 
 	// 样式相关
-	patternType  = "pattern"
-	patternValue = 1
-	errorBgColor = "FF5900"
+	patternType    = "pattern"
+	patternValue   = 1
+	errorBgColor   = "FF5900"
+	warningBgColor = "FFEB9C"
 
-	// HTTP 相关
-	contentTypeHeader = "Content-Type"
-	contentTypeJSON   = "application/json"
+	// 时间阈值
+	slowTestThreshold = 300 // 300毫秒
 )
 
 // 表头定义
@@ -53,329 +50,145 @@ func (r *Reporter) GenerateReport(results []model.TestResult, duration time.Dura
 }
 
 func (r *Reporter) generateExcelReport(results []model.TestResult, duration time.Duration) error {
-	f, err := r.initExcelFile()
+	// 打开原有的 Excel 文件
+	f, err := excelize.OpenFile(r.config.ExcelPath)
 	if err != nil {
-		return wrapError("初始化Excel文件", err)
+		return fmt.Errorf("打开Excel文件失败: %v", err)
 	}
 	defer f.Close()
 
+	// 创建新的工作表
 	sheetName := fmt.Sprintf(defaultSheetNameFormat, time.Now().Format(timeFormat))
 	index, err := f.NewSheet(sheetName)
 	if err != nil {
 		return fmt.Errorf("创建工作表失败: %v", err)
 	}
-
-	if err := r.writeHeaders(f, sheetName); err != nil {
-		return err
-	}
-
-	if err := r.writeTestResults(f, sheetName, results); err != nil {
-		return err
-	}
-
-	if err := r.writeSummary(f, sheetName, results, duration); err != nil {
-		return err
-	}
-
 	f.SetActiveSheet(index)
-	if err := f.Save(); err != nil {
-		return fmt.Errorf("保存Excel报告失败: %v", err)
-	}
 
-	absPath, _ := filepath.Abs(r.config.ExcelPath)
-	fmt.Printf("\nExcel测试报告已生成: %s (工作表: %s)\n", absPath, sheetName)
-	return nil
-}
-
-func (r *Reporter) initExcelFile() (*excelize.File, error) {
-	f, err := excelize.OpenFile(r.config.ExcelPath)
-	if err != nil {
-		return nil, fmt.Errorf("无法打开Excel文件: %v", err)
-	}
-	return f, nil
-}
-
-func (r *Reporter) writeHeaders(f *excelize.File, sheetName string) error {
-	// 设置所有列的宽度
+	// 设置列宽
 	for col := minColumn; col <= maxColumn; col++ {
 		colName := string(col)
-		if err := f.SetColWidth(sheetName, colName, colName, defaultColumnWidth); err != nil {
-			return fmt.Errorf("设置列宽度失败: %v", err)
-		}
+		f.SetColWidth(sheetName, colName, colName, defaultColumnWidth)
 	}
 
 	// 写入表头
 	for i, header := range excelHeaders {
-		cell := fmt.Sprintf("%c1", 'A'+i)
+		cell := fmt.Sprintf("%c1", minColumn+i)
 		f.SetCellValue(sheetName, cell, header)
 	}
-	return nil
-}
 
-func (r *Reporter) writeTestResults(f *excelize.File, sheetName string, results []model.TestResult) error {
+	// 写入测试结果
 	for i, result := range results {
 		row := i + 2
-		if err := r.writeTestResult(f, sheetName, row, result); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (r *Reporter) writeTestResult(f *excelize.File, sheetName string, row int, result model.TestResult) error {
-	pathParamsStr, pathErr := formatParams(result.PathParams)
-	queryParamsStr, queryErr := formatParams(result.QueryParams)
-
-	// 使用 map 来简化单元格映射
-	cellMap := map[string]interface{}{
-		"A": result.CaseNumber,
-		"B": result.CaseName,
-		"C": result.Method,
-		"D": result.Path,
-		"E": pathParamsStr,
-		"F": queryParamsStr,
-		"G": result.RequestBody,
-		"H": result.ExpectedResult,
-		"I": result.ActualResult,
-		"J": formatTestResult(result.Success),
-		"K": r.formatErrorMessage(result, pathErr, queryErr),
-		"L": result.Curl,
-	}
-
-	// 写入单元格值
-	for col, val := range cellMap {
-		f.SetCellValue(sheetName, fmt.Sprintf("%s%d", col, row), val)
-	}
-
-	return r.setRowStyle(f, sheetName, row, result.Success)
-}
-
-func (r *Reporter) formatErrorMessage(result model.TestResult, pathErr, queryErr error) string {
-	var errors []string
-	if result.Error != "" {
-		errors = append(errors, result.Error)
-	}
-	if pathErr != nil {
-		errors = append(errors, fmt.Sprintf("路径参数: %v", pathErr))
-	}
-	if queryErr != nil {
-		errors = append(errors, fmt.Sprintf("查询参数: %v", queryErr))
-	}
-	return strings.Join(errors, "\n")
-}
-
-func (r *Reporter) setRowStyle(f *excelize.File, sheetName string, row int, success bool) error {
-	// 只在测试失败时设置样式
-	if !success {
-		style, err := f.NewStyle(&excelize.Style{
-			Fill: excelize.Fill{
-				Type:    patternType,
-				Color:   []string{errorBgColor},
-				Pattern: patternValue,
-			},
-		})
-		if err != nil {
-			return err
-		}
-
-		// 为整行设置样式
-		for col := minColumn; col <= maxColumn; col++ {
-			cellName := fmt.Sprintf("%c%d", col, row)
-			if err := f.SetCellStyle(sheetName, cellName, cellName, style); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func (r *Reporter) printConsoleReport(results []model.TestResult, duration time.Duration) {
-	fmt.Println("\n=== 测试报告 ===")
-	fmt.Printf("总用例数: %d\n", len(results))
-	fmt.Printf("总执行时间: %v\n", duration)
-
-	successCount := 0
-	for _, result := range results {
-		if result.Success {
-			successCount++
-		}
-	}
-
-	fmt.Printf("成功用例数: %d\n", successCount)
-	fmt.Printf("失败用例数: %d\n", len(results)-successCount)
-	fmt.Println("\n详细结果:")
-
-	for _, result := range results {
-		fmt.Printf("\n=== 测试用例 #%d: %s ===\n", result.CaseNumber, result.CaseName)
-
-		// 构建并打印 curl 命令
-		curl := r.buildCurlCommand(result)
-		fmt.Printf("CURL命令: %s\n\n", curl)
-
-		fmt.Printf("请求方法: %s\n", result.Method)
-		fmt.Printf("请求路径: %s\n", result.Path)
-
-		if len(result.PathParams) > 0 {
-			fmt.Println("路径参数:")
-			for k, v := range result.PathParams {
-				fmt.Printf("  %s: %s\n", k, v)
-			}
-		}
-
-		if len(result.QueryParams) > 0 {
-			fmt.Println("查询参数:")
-			for k, v := range result.QueryParams {
-				fmt.Printf("  %s: %s\n", k, v)
-			}
-		}
-
-		if result.RequestBody != "" {
-			fmt.Printf("请求体: %s\n", result.RequestBody)
-		}
-
-		if result.Success {
-			fmt.Println("状态: 成功")
-			fmt.Printf("响应结果: %s\n", result.ActualResult)
-		} else {
-			fmt.Println("状态: 失败")
-			if result.Error != "" {
-				fmt.Printf("错误信息: %s\n", result.Error)
-			}
-			fmt.Printf("期望结果: %s\n", result.ExpectedResult)
-			fmt.Printf("实际结果: %s\n", result.ActualResult)
-		}
-	}
-}
-
-func formatParams(params map[string]string) (string, error) {
-	if len(params) == 0 {
-		return "", nil
-	}
-	var pairs []string
-	for k, v := range params {
-		// 检查参数格式
-		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
-			return "", fmt.Errorf("参数格式化错误: 键或值不能为空")
-		}
-		// 这里可以添加其他参数格式检查
-		pairs = append(pairs, fmt.Sprintf("%s=%s", k, v))
-	}
-	return strings.Join(pairs, "\n"), nil
-}
-
-func formatTestResult(success bool) string {
-	if success {
-		return "成功"
-	}
-	return "失败"
-}
-
-// 添加新方法用于构建 curl 命令
-func (r *Reporter) buildCurlCommand(result model.TestResult) string {
-	// 使用 url.Parse 解析基础 URL
-	baseURL, err := url.Parse(r.config.BaseURL)
-	if err != nil {
-		return fmt.Sprintf("无法解析URL: %v", err)
-	}
-
-	// 设置路径
-	baseURL.Path = path.Join(baseURL.Path, result.Path)
-
-	// 替换路径参数
-	urlPath := baseURL.Path
-	for k, v := range result.PathParams {
-		urlPath = strings.Replace(urlPath, "{"+k+"}", url.PathEscape(v), -1)
-	}
-	baseURL.Path = urlPath
-
-	// 添加查询参数
-	if len(result.QueryParams) > 0 {
-		q := baseURL.Query()
-		for k, v := range result.QueryParams {
-			q.Add(k, v)
-		}
-		baseURL.RawQuery = q.Encode()
-	}
-
-	// 构建 curl 命令
-	var curlParts []string
-	curlParts = append(curlParts, "curl", "-X", result.Method)
-
-	// 添加请求头
-	if r.config.Authorization != "" {
-		curlParts = append(curlParts, "-H", fmt.Sprintf("'Authorization: %s'", r.config.Authorization))
-	}
-	curlParts = append(curlParts, "-H", "'Content-Type: application/json'")
-
-	// 添加请求体
-	if result.RequestBody != "" {
-		curlParts = append(curlParts, "-d", fmt.Sprintf("'%s'", result.RequestBody))
-	}
-
-	// 添加 URL
-	curlParts = append(curlParts, fmt.Sprintf("'%s'", baseURL.String()))
-
-	return strings.Join(curlParts, " ")
-}
-
-func (r *Reporter) writeSummary(f *excelize.File, sheetName string, results []model.TestResult, duration time.Duration) error {
-	startRow := len(results) + 3
-
-	// 定义汇总信息，使用纵向布局
-	summaryItems := []struct {
-		label   string
-		value   string
-		isError bool
-	}{
-		{"测试汇总", "", false},
-		{"总用例数", fmt.Sprintf("%d", len(results)), false},
-		{"总执行时间", duration.String(), false},
-		{"成功用例数", fmt.Sprintf("%d", r.countSuccessfulTests(results)), false},
-		{"失败用例数", fmt.Sprintf("%d", len(results)-r.countSuccessfulTests(results)), true}, // 总是标记为错误
-	}
-
-	// 创建红色样式
-	errorStyle, err := f.NewStyle(&excelize.Style{
-		Fill: excelize.Fill{
-			Type:    patternType,
-			Color:   []string{errorBgColor},
-			Pattern: patternValue,
-		},
-	})
-	if err != nil {
-		return err
+		r.writeTestResult(f, sheetName, row, result)
 	}
 
 	// 写入汇总信息
-	for i, item := range summaryItems {
-		row := startRow + i
-		// 写入标签和值
-		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), item.label)
-		if item.value != "" {
-			f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), item.value)
-		}
+	summaryRow := len(results) + 3
+	r.writeSummary(f, sheetName, summaryRow, results, duration)
 
-		// 如果是失败用例行，设置红色背景
-		if item.isError {
-			f.SetCellStyle(sheetName, fmt.Sprintf("A%d", row), fmt.Sprintf("B%d", row), errorStyle)
-		}
+	// 保存文件
+	if err := f.Save(); err != nil {
+		return fmt.Errorf("保存报告失败: %v", err)
 	}
 
+	fmt.Printf("测试报告已保存到工作表: %s\n", sheetName)
 	return nil
 }
 
-// 提取计算成功测试数量的逻辑
-func (r *Reporter) countSuccessfulTests(results []model.TestResult) int {
-	successCount := 0
-	for _, result := range results {
-		if result.Success {
-			successCount++
+func (r *Reporter) writeTestResult(f *excelize.File, sheet string, row int, result model.TestResult) {
+	// 设置错误样式（红色背景）
+	errorStyle, _ := f.NewStyle(&excelize.Style{
+		Fill: excelize.Fill{
+			Type:    patternType,
+			Pattern: patternValue,
+			Color:   []string{errorBgColor},
+		},
+	})
+
+	// 设置警告样式（黄色背景）
+	warningStyle, _ := f.NewStyle(&excelize.Style{
+		Fill: excelize.Fill{
+			Type:    patternType,
+			Pattern: patternValue,
+			Color:   []string{warningBgColor},
+		},
+	})
+
+	// 写入测试结果
+	cells := []interface{}{
+		result.CaseNumber,
+		result.CaseName,
+		result.Method,
+		result.Path,
+		formatParams(result.PathParams),
+		formatParams(result.QueryParams),
+		result.RequestBody,
+		result.ExpectedResult,
+		result.ActualResult,
+		result.Success,
+		result.Error,
+		result.Curl,
+	}
+
+	for i, cell := range cells {
+		cellName := fmt.Sprintf("%c%d", minColumn+i, row)
+		f.SetCellValue(sheet, cellName, cell)
+
+		// 如果测试失败，设置红色背景
+		if !result.Success {
+			f.SetCellStyle(sheet, cellName, cellName, errorStyle)
+		} else if result.ExecutionTime > slowTestThreshold { // 如果执行时间超过阈值，设置黄色背景
+			f.SetCellStyle(sheet, cellName, cellName, warningStyle)
 		}
 	}
-	return successCount
 }
 
-// 添加错误包装函数
-func wrapError(op string, err error) error {
-	return fmt.Errorf("%s: %v", op, err)
+func (r *Reporter) writeSummary(f *excelize.File, sheet string, startRow int, results []model.TestResult, duration time.Duration) {
+	// 计算统计信息
+	totalTests := len(results)
+	failedTests := 0
+	for _, result := range results {
+		if !result.Success {
+			failedTests++
+		}
+	}
+
+	// 写入汇总信息
+	f.SetCellValue(sheet, fmt.Sprintf("A%d", startRow), "测试汇总")
+	f.SetCellValue(sheet, fmt.Sprintf("A%d", startRow+1), fmt.Sprintf("总执行时间: %.6fms", float64(duration.Microseconds())/1000))
+	f.SetCellValue(sheet, fmt.Sprintf("A%d", startRow+2), fmt.Sprintf("总用例数: %d", totalTests))
+	f.SetCellValue(sheet, fmt.Sprintf("A%d", startRow+3), fmt.Sprintf("失败用例数: %d", failedTests))
+}
+
+func (r *Reporter) printConsoleReport(results []model.TestResult, duration time.Duration) {
+	// 计算统计信息
+	totalTests := len(results)
+	failedTests := 0
+	for _, result := range results {
+		if !result.Success {
+			failedTests++
+		}
+	}
+
+	// 输出汇总信息
+	fmt.Printf("\n测试汇总\n")
+	fmt.Printf("总执行时间: %.6fms\n", float64(duration.Microseconds())/1000)
+	fmt.Printf("总用例数: %d\n", totalTests)
+	if failedTests > 0 {
+		fmt.Printf("\033[31m失败用例数: %d\033[0m\n", failedTests)
+	} else {
+		fmt.Printf("失败用例数: %d\n", failedTests)
+	}
+}
+
+func formatParams(params map[string]string) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var pairs []string
+	for k, v := range params {
+		pairs = append(pairs, fmt.Sprintf("%s=%s", k, v))
+	}
+	return strings.Join(pairs, "\n")
 }

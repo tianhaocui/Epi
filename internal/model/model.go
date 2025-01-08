@@ -11,6 +11,7 @@ type TestCase struct {
 	StrictMatch bool              // 是否完全匹配
 	BaseURL     string            // 基础URL（可选）
 	Token       string            // 认证令牌（可选）
+	Headers     map[string]string // 自定义请求头
 }
 
 type TestResult struct {
@@ -26,4 +27,5 @@ type TestResult struct {
 	ExpectedResult string
 	Error          string
 	Curl           string
+	ExecutionTime  float64 // 执行时间（毫秒）
 }
