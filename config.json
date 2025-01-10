@@ -1,0 +1,9 @@
+{
+    "excel_path": "cases.xlsx",
+    "sheet_name": "Sheet1",
+    "header_row": 1,
+    "base_url": "http://localhost:8080",
+    "authorization": "",
+    "timeout": "30s",
+    "concurrent": 1
+} 
